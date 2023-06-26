@@ -1,0 +1,7 @@
+
+# default speed of heatplace emulation
+heatplace_api_speed (Speed of heatplace emulation) int 72 1 3600
+
+# default number of steps of heatlace emulation
+heatplace_api_steps (Steps of heatplace emulation) int 1 1 3600
+
