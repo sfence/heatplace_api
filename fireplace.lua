@@ -32,10 +32,13 @@ local fuel_keys = {
     "heat_capacity", -- per amount and kelvin
     "solid_oxygen_need", -- per amount, optional
     "solid_burn_energy", -- energy created by burn (per amount)
+    "solid_smoke_amount", -- smoke created by burn (per solid burn amount)
     "burning_temp", -- solid burning temp
     "burning_coef", -- limitation of burning per surface
     "vapor_oxygen_need", -- per amount, optional
     "vapor_burn_energy", -- energy created by burn (per amount)
+    "vapor_amount", -- vapor created by sublimation (per sublimation amount)
+    "vapor_smoke_amount", -- smoke created by burn of vapor (per vapor amount)
     "sublimation_temp", -- in kelvin
     "sublimation_heat", -- per amount
     "sublimation_coef", -- limitation per surface
@@ -117,6 +120,8 @@ function fireplace.step(part, pos, meta, data, power, speed)
       
       local solid_oxygen_need = data[key_fuel.."_solid_oxygen_need"]
       local burning_temp = data[key_fuel.."_burning_temp"]
+      
+      print("fuel: "..fuel.." amount: "..amount.." temp: "..temp)
       -- burning
       local surface = (amount^(2/3))*surface_coef
       air_amount = air_amount - amount*volume_coef
@@ -125,14 +130,19 @@ function fireplace.step(part, pos, meta, data, power, speed)
       if (vapor_oxygen_need>0) and (temp>sublimation_temp) then
         local sublimation_heat = data[key_fuel.."_sublimation_heat"]/power
         local sublimation_coef = data[key_fuel.."_sublimation_coef"]
-        local vapor_amount = math.min(math.min(amount, surface*sublimation_coef), ((temp-sublimation_temp)*heat_capacity/sublimation_heat))
+        local vapor_amount = data[key_fuel.."_vapor_amount"]
+        local smoke_amount = data[key_fuel.."_vapor_smoke_amount"]
+        local sublimated_amount = math.min(math.min(amount, surface*sublimation_coef*speed), ((temp-sublimation_temp)*heat_capacity/sublimation_heat)*speed)
+        vapor_amount = sublimated_amount*vapor_amount
         --local vapor_amount = math.min(amount, (((1/1+math.exp(-k*(temp-sublimation_temp)))+0.5)*))
+        fuel_data["sublimated_amount"] = sublimated_amount
         fuel_data["vapor_amount"] = vapor_amount
+        fuel_data["vapor_smoke_amount"] = smoke_amount
         sum_oxygen_need = sum_oxygen_need + vapor_amount*vapor_oxygen_need
         
         -- sublimation is prioritized before solid burning
-        amount = amount - vapor_amount
-        temp = (temp*heat_capacity - vapor_amount*sublimation_heat)/heat_capacity
+        amount = amount - sublimated_amount
+        temp = (temp*heat_capacity - sublimated_amount*sublimation_heat)/heat_capacity
         data[temp_key] = temp
         
         print("vapor_amount: "..dump(vapor_amount))
@@ -141,8 +151,10 @@ function fireplace.step(part, pos, meta, data, power, speed)
       -- solid surface burning
       if (solid_oxygen_need>0) and (temp>burning_temp) then
         local burning_coef = data[key_fuel.."_burning_coef"]
-        local burn_amount = math.min(amount, surface*burning_coef)
+        local smoke_amount = data[key_fuel.."_solid_smoke_amount"]
+        local burn_amount = math.min(amount, surface*burning_coef*speed)
         fuel_data["burn_amount"] = burn_amount
+        fuel_data["smoke_amount"] = smoke_amount
         sum_oxygen_need = sum_oxygen_need + burn_amount*solid_oxygen_need
         
         print("burn_amount: "..dump(burn_amount))
@@ -152,9 +164,9 @@ function fireplace.step(part, pos, meta, data, power, speed)
   
   local atmosphere = fireplace.get_atmosphere(pos)
   local air_heat_capacity = atmosphere.heat_capacity/power
-  local air_flow_limit = part.air_flow_base+part.air_flow_coef*(data[key_part_temp]-atmosphere.temp)
+  local air_flow_limit = (part.air_flow_base+part.air_flow_coef*(data[key_part_temp]-atmosphere.temp))*speed
   local oxygen_aviable = air_flow_limit*atmosphere.oxygen
-  local oxygen_part = math.min(1.0, (sum_oxygen_need/oxygen_aviable))
+  local oxygen_part = math.max(0, math.min(1.0, (sum_oxygen_need/oxygen_aviable)))
   
   local air_energy
   print("air_flow_limit: "..dump(air_flow_limit).." air_amount: "..air_amount.." part_temp: "..data[key_part_temp])
@@ -167,7 +179,7 @@ function fireplace.step(part, pos, meta, data, power, speed)
     air_energy = air_amount*new_air_part*air_heat_capacity*atmosphere.temp+air_amount*(1-new_air_part)*air_heat_capacity*data[key_part_temp]
     print("new_air_part: "..dump(new_air_part))
   end
-  print("air_energy: "..dump(air_energy))
+  print("air_energy: "..dump(air_energy).." oxygen_part: "..oxygen_part.." air_flow_limit: "..air_flow_limit.." air_temp: "..(air_energy/(air_amount*air_heat_capacity)))
   
   for fuel=1,part.fuels do
     local key_fuel = part.key.."_fuel"..fuel
@@ -181,26 +193,35 @@ function fireplace.step(part, pos, meta, data, power, speed)
       if fuel_data["vapor_amount"] then
         local vapor_burn_energy = data[key_fuel.."_vapor_burn_energy"]
         
+        local sublimated_amount = fuel_data["sublimated_amount"]
         local vapor_amount = fuel_data["vapor_amount"]
-        amount = amount - vapor_amount*speed
-        air_energy = air_energy + temp*air_heat_capacity*vapor_amount + vapor_amount*vapor_burn_energy*oxygen_part
-        air_amount = air_amount + vapor_amount
+        amount = amount - sublimated_amount
+        local burned_amount = vapor_amount*oxygen_part
+        local added_amount = (vapor_amount-burned_amount) + burned_amount*fuel_data["vapor_smoke_amount"]
+        air_energy = air_energy + temp*air_heat_capacity*(vapor_amount-burned_amount) + burned_amount*vapor_burn_energy
+        air_amount = air_amount + added_amount
+        
+        print("fuel: "..fuel.." amount: "..amount.." sublimated_amount: "..sublimated_amount.." vapor_amount: "..vapor_amount.." burned_amount: "..burned_amount)
+        print("smoke temp: "..(((vapor_amount-burned_amount)*temp*air_heat_capacity+burned_amount*vapor_burn_energy)/(added_amount*air_heat_capacity)).." smoke_amount: "..added_amount)
       end
       if fuel_data["burn_amount"] then
         local solid_burn_energy = data[key_fuel.."_solid_burn_energy"]
         
         local burn_amount = fuel_data["burn_amount"]*oxygen_part
-        amount = amount - burn_amount*speed
+        amount = amount - burn_amount
         air_energy = air_energy + temp*air_heat_capacity*burn_amount + burn_amount*solid_burn_energy
-        air_amount = air_amount + burn_amount
+        air_amount = air_amount + burn_amount*fuel_data["smoke_amount"]
+        
+        print("fuel: "..fuel.." amount: "..amount.." burn_amount: "..burn_amount)
       end
       data[key_amount] = math.max(amount, 0)
     end
   end
   
   -- air temp
-  local part_temp = air_energy/(air_heat_capacity*air_amount)
+  local heat2_cap = air_heat_capacity*air_amount
   print("air_energy: "..dump(air_energy).." air_heat_capacity: "..dump(air_heat_capacity).." part_temp: "..dump(data[key_part_temp]))
+  
   
   for fuel=1,part.fuels do
     local key_fuel = part.key.."_fuel"..fuel
@@ -216,12 +237,22 @@ function fireplace.step(part, pos, meta, data, power, speed)
       local surface_coef = data[key_fuel.."_surface_coef"]
       local surface_thermal_cond_coef = data[key_fuel.."_surface_thermal_cond_coef"]
       
-      local heat_cond = (amount^(2/3))*surface_coef*surface_thermal_cond_coef*(part_temp-temp)
+      local heat1_cap = heat_capacity*amount
       
-      air_energy = math.max(air_energy - heat_cond, 0)
-      data[key_temp] = (temp*heat_capacity*amount+heat_cond)/(heat_capacity*amount)
+      local part_temp = air_energy/heat2_cap
       
-      print("heat_cond: "..dump(heat_cond).." fuel_temp_change: "..dump(-heat_cond/(heat_capacity*amount)))
+      local temp_diff = part_temp - temp
+      local cond_move = (amount^(2/3))*surface_coef*surface_thermal_cond_coef*temp_diff*speed
+      local cond_limit = (heat1_cap*heat2_cap*temp_diff)/(heat2_cap+heat1_cap)
+      
+      if (math.abs(cond_move)>math.abs(cond_limit)) then
+        cond_move = cond_limit
+      end
+      
+      air_energy = math.max(air_energy - cond_move, 0)
+      data[key_temp] = (temp*heat_capacity*amount+cond_move)/(heat_capacity*amount)
+      
+      print("fuel: "..fuel.." amount: "..amount.." cond_limit: "..cond_limit.." heat_cond: "..dump(cond_move).." fuel_temp_change: "..dump(-cond_move/(heat_capacity*amount)))
     end
   end
   

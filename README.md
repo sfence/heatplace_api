@@ -19,3 +19,7 @@ Copy or link `test_api` to `test_api` directory in main mod directory.
 
 Run python file `tb_*.py`.
 
+Adding fuels
+------------
+
+Temp of flame is equal to: `burn_energy/((smoke_amount + oxygen_need)*heat_capacity) `
